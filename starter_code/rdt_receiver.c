@@ -86,25 +86,67 @@ int main(int argc, char **argv) {
     clientlen = sizeof(clientaddr);
     int next_seqno = 0;
 
-    // code to receive from sender goes here
     while (1) {
         /*
          * recvfrom: receive a UDP datagram from a client
          */
         if (recvfrom(sockfd, buffer, MSS_SIZE, 0, (struct sockaddr *) &clientaddr, (socklen_t *)&clientlen) < 0) {
             error("ERROR in recvfrom");
-        
-	    }
+        }
+
         recvpkt = (tcp_packet *) buffer;
+        assert(get_data_size(recvpkt) <= DATA_SIZE);
         /* 
          * sendto: ACK back to the client 
          */
         gettimeofday(&tp, NULL);
         VLOG(DEBUG, "%lu, %d, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, next_seqno, recvpkt->hdr.seqno);
 
-        // testing for last packet
-        if (recvpkt->hdr.seqno == 0) {
+        // if last packet, send ACK and break out of loop
+        if (recvpkt->hdr.data_size == 0 && next_seqno == recvpkt->hdr.seqno)
+        {
+            VLOG(INFO, "End Of File has been reached");
+
+            // send the last ACK 8 times(a hack to circumvent the loss of the last ACK)
+            // this is a hack to make sure the client has received the last packet and is not waiting for more
+            // since we are breaking out of the loop
+            for (int i = 0; i < 8;i++){ 
+                sndpkt = make_packet(0);
+                sndpkt->hdr.ackno = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
+                sndpkt->hdr.ctr_flags = ACK;
+                if(sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr *)&clientaddr, clientlen) < 0) {
+                    error("Could not send ACK\n");
+                }
+            } 	
+            // close the file
+            fclose(fp);
+
+            // break out of the loop
             break;
+        }
+
+        // if the packet is the next packet in the sequence, send an ACK for it and write to file
+        else if(next_seqno == recvpkt->hdr.seqno) {
+            VLOG(INFO, "Packet in order");
+            next_seqno += recvpkt->hdr.data_size;
+            fwrite(recvpkt->data, 1, recvpkt->hdr.data_size, fp);
+            sndpkt = make_packet(0);
+            sndpkt->hdr.ackno = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
+            sndpkt->hdr.ctr_flags = ACK;
+            if(sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr *)&clientaddr, clientlen) < 0) {
+                error("Could not send ACK\n");
+            }
+        }
+
+        // if the packet is not the next packet in sequence, send the last ACK again
+        else if(next_seqno != recvpkt->hdr.seqno) {
+            VLOG(INFO, "Packet out of order");
+            sndpkt = make_packet(0);
+            sndpkt->hdr.ackno = next_seqno;
+            sndpkt->hdr.ctr_flags = ACK;
+            if(sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr *)&clientaddr, clientlen) < 0) {
+                error("Could not send ACK\n");
+            }
         }
 
     }
